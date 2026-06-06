@@ -1,10 +1,34 @@
-import { useState, useEffect, useRef } from "react";
+/* eslint-disable no-mixed-operators */
+import { useState, useEffect, useRef, useCallback } from "react";
 
-// ── Storage ──────────────────────────────────────────────────────
-const S = {
-  get: (k) => { try { const r = localStorage.getItem(k); return r ? JSON.parse(r) : null; } catch { return null; } },
-  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+// ── Supabase Config ───────────────────────────────────────────────
+const SUPA_URL = "https://cerxzyphhoptxrknsbbr.supabase.co";
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNlcnh6eXBoaG9wdHhya25zYmJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2ODkxOTUsImV4cCI6MjA5NjI2NTE5NX0.s3iES2ikIgWlwbb66vi6mWkzdvq5ypiN7PejrqUo8sw";
+const HEADERS = { "Content-Type": "application/json", "apikey": SUPA_KEY, "Authorization": `Bearer ${SUPA_KEY}`, "Prefer": "return=representation" };
+const API = (table) => `${SUPA_URL}/rest/v1/${table}`;
+
+const db_get = async (table, query="") => {
+  try {
+    const r = await fetch(`${API(table)}${query}`, { headers: HEADERS });
+    return await r.json();
+  } catch { return []; }
 };
+const db_upsert = async (table, data) => {
+  try {
+    await fetch(API(table), { method: "POST", headers: {...HEADERS, "Prefer":"resolution=merge-duplicates,return=representation"}, body: JSON.stringify(data) });
+  } catch {}
+};
+const db_update = async (table, id, data) => {
+  try {
+    await fetch(`${API(table)}?id=eq.${id}`, { method: "PATCH", headers: HEADERS, body: JSON.stringify(data) });
+  } catch {}
+};
+const db_delete = async (table, id) => {
+  try {
+    await fetch(`${API(table)}?id=eq.${id}`, { method: "DELETE", headers: HEADERS });
+  } catch {}
+};
+
 
 // ── Constants ────────────────────────────────────────────────────
 const ADMIN = { email: "admin@traintrack.com", password: "Admin@123" };
@@ -84,27 +108,126 @@ const Modal = ({title,children,onClose}) => (
 
 // ════════════════════════════════════════════════════════════════
 export default function App() {
-  const [session,setSession]=useState(null);
+  const [session,setSession]=useState(()=>{try{const s=localStorage.getItem("tt_sess");return s?JSON.parse(s):null;}catch{return null;}});
   const [db,setDb]=useState({
-    trainers:[],trainees:[],plans:[],attendance:[],
+    trainers:[],trainees:[],plans:[],attendance:[],planStatuses:{},
     feedbacks:[],activities:[],customTopics:[],
     masters:{channels:[],locations:[],training:[],tasks:[],divisions:[],activityTypes:[]},
   });
+  const [loading,setLoading]=useState(true);
 
-  useEffect(()=>{
-    const saved=S.get("tt_db");
-    if(saved) setDb(prev=>({...prev,...saved,
-      masters:{channels:[],locations:[],training:[],tasks:[],divisions:[],activityTypes:[],...(saved.masters||{})}}));
-    const sess=S.get("tt_session"); if(sess) setSession(sess);
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [trainers,trainees,plans,attendance,feedbacks,activities,planStatusRows,mastersRows] = await Promise.all([
+        db_get("trainers","?order=created_at"),
+        db_get("trainees","?order=joining_date"),
+        db_get("plans","?order=date.desc"),
+        db_get("attendance","?order=date.desc"),
+        db_get("feedbacks","?order=date.desc"),
+        db_get("activities","?order=date.desc"),
+        db_get("plan_statuses"),
+        db_get("masters","?id=eq.1"),
+      ]);
+      // convert plan_statuses rows to object map
+      const psMap={};
+      (planStatusRows||[]).forEach(r=>{ psMap[`${r.plan_id}_${r.topic}`]=r.status; });
+      const m=mastersRows&&mastersRows[0]||{};
+      setDb({
+        trainers:(trainers||[]).map(t=>({...t,createdAt:t.created_at||t.createdAt||""})),
+        trainees:(trainees||[]).map(t=>({
+          ...t,
+          empId:t.emp_id||t.empId||"",
+          joiningDate:t.joining_date||t.joiningDate||"",
+          trainerId:t.trainer_id||t.trainerId||"",
+          leftDate:t.left_date||t.leftDate||null,
+          reportingManager:t.reporting_manager||t.reportingManager||"",
+          exitType:t.exit_type||t.exitType||"",
+          noticePeriod:t.notice_period||t.noticePeriod||"",
+          resignChannel:t.resign_channel||t.resignChannel||"",
+          exitReason:t.exit_reason||t.exitReason||"",
+          voiceCallName:t.voice_call_name||t.voiceCallName||"",
+          voiceCallData:t.voice_call_data||t.voiceCallData||"",
+          exitInterviewName:t.exit_interview_name||t.exitInterviewName||"",
+          exitInterviewData:t.exit_interview_data||t.exitInterviewData||"",
+        })),
+        plans:(plans||[]).map(p=>({
+          ...p,
+          traineeId:p.trainee_id||p.traineeId||"",
+          topics:p.topics||[],
+          tasks:p.tasks||[],
+        })),
+        attendance:(attendance||[]).map(a=>({...a,traineeId:a.trainee_id||a.traineeId||""})),
+        feedbacks:(feedbacks||[]).map(f=>({
+          ...f,
+          traineeId:f.trainee_id||f.traineeId||"",
+          trainerName:f.trainer_name||f.trainerName||"",
+          sessionRate:f.session_rate||f.sessionRate||0,
+          aspects:f.aspects||[],
+        })),
+        activities:(activities||[]).map(a=>({
+          ...a,
+          traineeId:a.trainee_id||a.traineeId||"",
+          photoData:a.photo_data||a.photoData||"",
+          loggedBy:a.logged_by||a.loggedBy||"trainee",
+        })),
+        planStatuses:psMap,
+        customTopics:[],
+        masters:{
+          channels:m.channels||[],locations:m.locations||[],
+          divisions:m.divisions||[],training:m.training||[],
+          tasks:m.tasks||[],activityTypes:m.activity_types||[],
+        },
+      });
+    } catch(e){ console.error(e); }
+    setLoading(false);
   },[]);
 
-  const saveDb  = (n) => { setDb(n); S.set("tt_db",n); };
-  const patch   = (key,val) => saveDb({...db,[key]:val});
-  const patchM  = (key,val) => saveDb({...db,masters:{...db.masters,[key]:val}});
-  const logout  = () => { setSession(null); S.set("tt_session",null); };
+  useEffect(()=>{ loadAll(); },[loadAll]);
 
-  if(!session) return <LoginScreen db={db} onLogin={s=>{setSession(s);S.set("tt_session",s);}}/>;
-  return <AppShell session={session} db={db} patch={patch} patchM={patchM} saveDb={saveDb} logout={logout}/>;
+  // ── patch functions hit Supabase directly ──
+  const patch = useCallback(async (key,val) => {
+    setDb(prev=>({...prev,[key]:val}));
+    if(key==="trainers") { for(const t of val) await db_upsert("trainers",{id:t.id,name:t.name,email:t.email,password:t.password,mobile:t.mobile||"",channel:t.channel||"",location:t.location||"",division:t.division||"",active:t.active,created_at:t.createdAt||""}); }
+    if(key==="trainees") { for(const t of val) await db_upsert("trainees",{id:t.id,name:t.name,emp_id:t.empId,email:t.email,password:t.password,mobile:t.mobile||"",joining_date:t.joiningDate||"",channel:t.channel||"",location:t.location||"",division:t.division||"",trainer_id:t.trainerId||"",active:(t.active!==false),left_date:(t.leftDate||null),reporting_manager:t.reportingManager||"",exit_type:t.exitType||"",notice_period:t.noticePeriod||"",resign_channel:t.resignChannel||"",exit_reason:t.exitReason||"",voice_call_name:t.voiceCallName||"",voice_call_data:t.voiceCallData||"",exit_interview_name:t.exitInterviewName||"",exit_interview_data:t.exitInterviewData||""}); }
+    if(key==="plans") { const existing=await db_get("plans"); const existIds=(existing||[]).map(e=>e.id); for(const p of val){ if(!existIds.includes(p.id)) await db_upsert("plans",{id:p.id,trainee_id:p.traineeId,date:p.date,topics:p.topics,tasks:p.tasks||[],notes:p.notes||""}); } const newIds=val.map(p=>p.id); for(const e of (existing||[])){ if(!newIds.includes(e.id)) await db_delete("plans",e.id); } }
+    if(key==="attendance") { for(const a of val) await db_upsert("attendance",{id:a.id,trainee_id:a.traineeId,date:a.date,status:a.status}); }
+    if(key==="feedbacks") { for(const f of val) await db_upsert("feedbacks",{id:f.id,trainee_id:f.traineeId,date:f.date,topic:f.topic||"",trainer_name:f.trainerName||"",session_rate:f.sessionRate||0,clarity:f.clarity||0,relevance:f.relevance||0,materials:f.materials||0,aspects:f.aspects||[],comment:f.comment||""}); }
+    if(key==="activities") { const existing=await db_get("activities"); const existIds=(existing||[]).map(e=>e.id); for(const a of val){ if(!existIds.includes(a.id)) await db_upsert("activities",{id:a.id,trainee_id:a.traineeId,date:a.date,type:a.type,description:a.description,lat:a.lat||"",lng:a.lng||"",timestamp:a.timestamp||"",photo_data:a.photoData||"",logged_by:a.loggedBy||"trainee"}); } const newIds=val.map(a=>a.id); for(const e of (existing||[])){ if(!newIds.includes(e.id)) await db_delete("activities",e.id); } }
+    if(key==="planStatuses") {
+      const prev=db.planStatuses||{};
+      for(const k of Object.keys(val)){
+        const [planId,...rest]=k.split("_"); const topic=rest.join("_");
+        if(val[k]!==prev[k]){
+          const rows=await db_get("plan_statuses",`?plan_id=eq.${planId}&topic=eq.${encodeURIComponent(topic)}`);
+          if(rows&&rows.length>0) await db_update("plan_statuses",rows[0].id,{status:val[k]});
+          else await db_upsert("plan_statuses",{id:uid(),plan_id:planId,topic,status:val[k]});
+        }
+      }
+    }
+  },[db]);
+
+  const patchM = useCallback(async (key,val) => {
+    const colMap={channels:"channels",locations:"locations",divisions:"divisions",training:"training",tasks:"tasks",activityTypes:"activity_types"};
+    const col=colMap[key]||key;
+    setDb(prev=>({...prev,masters:{...prev.masters,[key]:val}}));
+    await fetch(`${API("masters")}?id=eq.1`,{method:"PATCH",headers:HEADERS,body:JSON.stringify({[col]:val})});
+  },[]);
+
+  const logout = () => { setSession(null); localStorage.removeItem("tt_sess"); };
+
+  if(loading) return (
+    <div style={{minHeight:"100vh",background:"#0f1117",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16}}>
+      <style>{CSS}</style>
+      <div className="login-logo" style={{fontSize:48}}>◈</div>
+      <div className="app-title" style={{fontSize:24,fontFamily:"'Rajdhani',sans-serif",color:"#f5a623",letterSpacing:2}}>TrainTrack</div>
+      <div style={{color:"#8892a4",fontSize:13}}>Loading data…</div>
+      <div className="loader"></div>
+    </div>
+  );
+
+  if(!session) return <LoginScreen db={db} onLogin={s=>{setSession(s);localStorage.setItem("tt_sess",JSON.stringify(s));}}/>;
+  return <AppShell session={session} db={db} patch={patch} patchM={patchM} saveDb={()=>{}} logout={logout} reload={loadAll}/>;
 }
 
 // ── Login ────────────────────────────────────────────────────────
@@ -152,7 +275,7 @@ function LoginScreen({db,onLogin}){
 }
 
 // ── App Shell ────────────────────────────────────────────────────
-function AppShell({session,db,patch,patchM,saveDb,logout}){
+function AppShell({session,db,patch,patchM,saveDb,logout,reload}){
   const {role,user}=session;
   const [tab,setTab]=useState("dashboard");
 
@@ -191,7 +314,8 @@ function AppShell({session,db,patch,patchM,saveDb,logout}){
             <span className="user-role-dot" data-role={role}></span>
             <span>{user?.name||user?.email}</span>
           </div>
-          <button className="logout-btn" onClick={logout}>⏻</button>
+          <button className="logout-btn" onClick={reload} title="Refresh data">↻</button>
+          <button className="logout-btn" onClick={logout} title="Logout">⏻</button>
         </div>
       </header>
 
@@ -1543,6 +1667,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--font-body)}
 .login-sub{font-size:12px;color:var(--text2);margin-bottom:24px}
 .login-form{text-align:left}
 .login-hint{font-size:11px;color:var(--text2);text-align:center;margin-top:12px}
+.loader{width:32px;height:32px;border:3px solid #2a3050;border-top-color:#f5a623;border-radius:50%;animation:spin 0.8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
 
 .rm-toggle-btn{padding:5px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text2);font-size:12px;cursor:pointer;font-family:var(--font-body);transition:all .15s}
 .rm-toggle-btn.active{background:var(--accent2);border-color:var(--accent2);color:#fff;font-weight:600}
